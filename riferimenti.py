@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 from io import StringIO
@@ -26,10 +25,6 @@ def lower_norm(val) -> str:
     return normalize_str(val).lower()
 
 def quote_if_value(val: str) -> str:
-    """
-    Aggiunge doppi apici come nei tuoi script originali
-    (vuoto o 'nan' -> stringa vuota).
-    """
     if val is None:
         return ""
     sval = str(val).strip()
@@ -38,10 +33,6 @@ def quote_if_value(val: str) -> str:
     return f'"{sval}"'
 
 def pick_column(series_names, df: pd.DataFrame, fallback_idx=None) -> pd.Series:
-    """
-    Prova a trovare la colonna per nome (case-insensitive).
-    Se non la trova, usa il fallback per indice (come da posizioni A,B,E,J,Q).
-    """
     cols_lower = {str(c).strip().lower(): c for c in df.columns}
     for candidate in series_names:
         key = str(candidate).strip().lower()
@@ -49,7 +40,6 @@ def pick_column(series_names, df: pd.DataFrame, fallback_idx=None) -> pd.Series:
             return df[cols_lower[key]]
     if fallback_idx is not None and 0 <= fallback_idx < df.shape[1]:
         return df.iloc[:, fallback_idx]
-    # Nessun match: torna una serie vuota così non rompe il flusso
     return pd.Series([None] * len(df))
 
 # -----------------------------
@@ -102,29 +92,27 @@ if generate:
         st.error(f"Errore nel leggere l'Excel: {e}")
         st.stop()
 
-    # Normalizza header
     raw_df.columns = [str(c).strip() for c in raw_df.columns]
 
     # Mappatura colonne con fallback a posizioni:
-    # A: SamAccountName (0), B: Name (1), E: Mobile (4), J: mail (9), Q: Description (16)
     col_sam = pick_column(["SamAccountName", "sAMAccountName"], raw_df, fallback_idx=0)
     col_name = pick_column(["Name"], raw_df, fallback_idx=1)
     col_mobile = pick_column(["Mobile"], raw_df, fallback_idx=4)
     col_mail = pick_column(["mail", "Mail", "e-mail", "email"], raw_df, fallback_idx=9)
     col_desc_old = pick_column(["Description", "Descrizione"], raw_df, fallback_idx=16)
 
-    estr_df = pd.DataFrame({
-        "samaccountname": col_sam.astype(str),
-        "name": col_name.astype(str),
-        "mobile": col_mobile.astype(str),
-        "mail": col_mail.astype(str),
-        "description_old": col_desc_old.astype(str),
-    })
+    # ✅ Fix: usa concat per evitare errori di lunghezza
+    estr_df = pd.concat(
+        [col_sam.rename("samaccountname"),
+         col_name.rename("name"),
+         col_mobile.rename("mobile"),
+         col_mail.rename("mail"),
+         col_desc_old.rename("description_old")],
+        axis=1
+    ).astype(str)
 
-    # Colonna normalizzata per match case-insensitive
     estr_df["sam_norm"] = estr_df["samaccountname"].map(lower_norm)
 
-    # Header come nei tuoi script
     header_rif = [
         "Computer", "OU",
         "add_mail", "remove_mail",
@@ -143,68 +131,52 @@ if generate:
     rows_rif = []
     rows_desc = []
     warnings = []
-
-    # Cicla le coppie
     valid_pairs = 0
+
     for _, r in pairs_df.iterrows():
         nuovo_pc = normalize_str(r.get("NuovoPC", ""))
         utenza = normalize_str(r.get("samaccountname", ""))
 
         if not nuovo_pc or not utenza:
-            # salta righe vuote
             continue
-
         valid_pairs += 1
-
-        # Cerca match SamAccountName
         match = estr_df[estr_df["sam_norm"] == utenza.lower()]
         if match.empty:
-            warnings.append(f"• Utente '{utenza}' non trovato nel file estr_dati: campi mail/mobile/Name lasciati vuoti.")
-            mail = ""  # come nel tuo codice1: mail non quotata
-            mobile_q = quote_if_value("")  # mobile quotato se presente
-            display_q = quote_if_value("")  # Name quotato se presente
+            warnings.append(f"• Utente '{utenza}' non trovato nel file estr_dati.")
+            mail = ""
+            mobile_q = quote_if_value("")
+            display_q = quote_if_value("")
             old_pc = ""
         else:
             rec = match.iloc[0]
-            mail = normalize_str(rec["mail"])  # non quotato, come nel codice1
-            mobile_q = quote_if_value(normalize_str(rec["mobile"]))  # quotato nel codice1
-            display_q = quote_if_value(normalize_str(rec["name"]))   # quotato nel codice1
+            mail = normalize_str(rec["mail"])
+            mobile_q = quote_if_value(normalize_str(rec["mobile"]))
+            display_q = quote_if_value(normalize_str(rec["name"]))
             old_pc = normalize_str(rec["description_old"])
             if old_pc.lower() == "nan":
                 old_pc = ""
 
-        # CSV 1: riga di aggiunta (sempre)
+        # Riga aggiunta
         rows_rif.append([
-            nuovo_pc, "",           # Computer, OU
-            mail, "",               # add_mail, remove_mail
-            mobile_q, "",           # add_mobile, remove_mobile
-            display_q, "",          # add_userprincipalname, remove_userprincipalname
-            "", ""                  # disable, moveToOU
+            nuovo_pc, "", mail, "", mobile_q, "", display_q, "", "", ""
         ])
 
-        # CSV 1: riga di rimozione se c'è il vecchio asset (Description)
+        # Riga rimozione se vecchio asset presente
         if old_pc:
             rows_rif.append([
-                old_pc, "",         # Computer, OU
-                "", mail,           # add_mail, remove_mail
-                "", mobile_q,       # add_mobile, remove_mobile
-                "", display_q,      # add_userprincipalname, remove_userprincipalname
-                "", ""              # disable, moveToOU
+                old_pc, "", "", mail, "", mobile_q, "", display_q, "", ""
             ])
 
-        # CSV 2: come nel tuo codice2 -> solo sAMAccountName e Description (con doppi apici)
+        # CSV descrizione
         rows_desc.append([
-            quote_if_value(utenza),     # sAMAccountName
-            "", "", "", "", "", "", "", "", "", "",
-            quote_if_value(nuovo_pc),   # Description
-            "", "", "", "", "", "", "", "", "", ""
+            quote_if_value(utenza), "", "", "", "", "", "", "", "", "", "",
+            quote_if_value(nuovo_pc), "", "", "", "", "", "", "", "", "", ""
         ])
 
     if valid_pairs == 0:
-        st.warning("Nessuna combinazione valida: inserisci almeno una riga con **NuovoPC** e **samaccountname**.")
+        st.warning("Nessuna combinazione valida.")
         st.stop()
 
-    # Serializza CSV in memoria
     buf1 = StringIO()
     w1 = csv.writer(buf1, lineterminator="\n")
     w1.writerow(header_rif)
@@ -215,29 +187,14 @@ if generate:
     w2.writerow(header_desc)
     w2.writerows(rows_desc)
 
-    # Esito & Download
-    st.success(f"CSV generati: {file1_name} (righe: {len(rows_rif)}) e {file2_name} (righe: {len(rows_desc)})")
-
+    st.success(f"CSV generati: {file1_name} e {file2_name}")
     if warnings:
         st.warning("\n".join(warnings))
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.download_button(
-            "⬇️ Scarica CSV Riferimenti",
-            data=buf1.getvalue().encode("utf-8"),
-            file_name=file1_name,
-            mime="text/csv"
-        )
-        st.markdown("**Anteprima Riferimenti**")
-        st.dataframe(pd.DataFrame(rows_rif, columns=header_rif).head(50), use_container_width=True)
-
+        st.download_button("⬇️ Scarica CSV Riferimenti", buf1.getvalue().encode("utf-8"), file_name=file1_name)
+        st.dataframe(pd.DataFrame(rows_rif, columns=header_rif).head(50))
     with col_b:
-        st.download_button(
-            "⬇️ Scarica CSV Descrition",
-            data=buf2.getvalue().encode("utf-8"),
-            file_name=file2_name,
-            mime="text/csv"
-        )
-        st.markdown("**Anteprima Descrition**")
-        st.dataframe(pd.DataFrame(rows_desc, columns=header_desc).head(50), use_container_width=True)
+        st.download_button("⬇️ Scarica CSV Descrition", buf2.getvalue().encode("utf-8"), file_name=file2_name)
+        st.dataframe(pd.DataFrame(rows_desc, columns=header_desc).head(50))
