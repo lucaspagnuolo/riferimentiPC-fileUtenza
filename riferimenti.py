@@ -3,7 +3,6 @@ import pandas as pd
 from io import StringIO
 from datetime import date
 import csv
-
 # -----------------------------
 # Configurazione pagina
 # -----------------------------
@@ -25,6 +24,10 @@ def lower_norm(val) -> str:
     return normalize_str(val).lower()
 
 def quote_if_value(val: str) -> str:
+    """
+    Aggiunge doppi apici come nei tuoi script originali
+    (vuoto o 'nan' -> stringa vuota).
+    """
     if val is None:
         return ""
     sval = str(val).strip()
@@ -33,6 +36,9 @@ def quote_if_value(val: str) -> str:
     return f'"{sval}"'
 
 def pick_column(series_names, df: pd.DataFrame, fallback_idx=None) -> pd.Series:
+    """
+    Trova la colonna per nome (case-insensitive); se non la trova usa l'indice fallback.
+    """
     cols_lower = {str(c).strip().lower(): c for c in df.columns}
     for candidate in series_names:
         key = str(candidate).strip().lower()
@@ -40,6 +46,7 @@ def pick_column(series_names, df: pd.DataFrame, fallback_idx=None) -> pd.Series:
             return df[cols_lower[key]]
     if fallback_idx is not None and 0 <= fallback_idx < df.shape[1]:
         return df.iloc[:, fallback_idx]
+    # Nessun match: crea una Serie di None della stessa lunghezza del DF
     return pd.Series([None] * len(df))
 
 # -----------------------------
@@ -95,24 +102,29 @@ if generate:
     raw_df.columns = [str(c).strip() for c in raw_df.columns]
 
     # Mappatura colonne con fallback a posizioni:
+    # A: SamAccountName (0), B: Name (1), E: Mobile (4), J: mail (9), Q: Description (16)
     col_sam = pick_column(["SamAccountName", "sAMAccountName"], raw_df, fallback_idx=0)
     col_name = pick_column(["Name"], raw_df, fallback_idx=1)
     col_mobile = pick_column(["Mobile"], raw_df, fallback_idx=4)
     col_mail = pick_column(["mail", "Mail", "e-mail", "email"], raw_df, fallback_idx=9)
     col_desc_old = pick_column(["Description", "Descrizione"], raw_df, fallback_idx=16)
 
-    # ✅ Fix: usa concat per evitare errori di lunghezza
+    # ✅ Fix robusto: concat per allineamento per indice ed evitare errori di lunghezza
     estr_df = pd.concat(
-        [col_sam.rename("samaccountname"),
-         col_name.rename("name"),
-         col_mobile.rename("mobile"),
-         col_mail.rename("mail"),
-         col_desc_old.rename("description_old")],
+        [
+            col_sam.rename("samaccountname"),
+            col_name.rename("name"),
+            col_mobile.rename("mobile"),
+            col_mail.rename("mail"),
+            col_desc_old.rename("description_old"),
+        ],
         axis=1
     ).astype(str)
 
+    # Colonna normalizzata per il match case-insensitive
     estr_df["sam_norm"] = estr_df["samaccountname"].map(lower_norm)
 
+    # Header dei due CSV
     header_rif = [
         "Computer", "OU",
         "add_mail", "remove_mail",
@@ -139,13 +151,16 @@ if generate:
 
         if not nuovo_pc or not utenza:
             continue
+
         valid_pairs += 1
+
+        # Match su SamAccountName
         match = estr_df[estr_df["sam_norm"] == utenza.lower()]
         if match.empty:
             warnings.append(f"• Utente '{utenza}' non trovato nel file estr_dati.")
-            mail = ""
-            mobile_q = quote_if_value("")
-            display_q = quote_if_value("")
+            mail = ""                              # add_mail/remove_mail -> stringa (non quotata)
+            mobile_q = quote_if_value("")          # add/remove_mobile -> quotata se presente
+            display_q = quote_if_value("")         # add/remove_userprincipalname -> quotata se presente
             old_pc = ""
         else:
             rec = match.iloc[0]
@@ -156,27 +171,42 @@ if generate:
             if old_pc.lower() == "nan":
                 old_pc = ""
 
-        # Riga aggiunta
-        rows_rif.append([
-            nuovo_pc, "", mail, "", mobile_q, "", display_q, "", "", ""
-        ])
+        # -----------------------------
+        # CSV 1: RIFERIMENTI
+        # Ordinamento richiesto: prima RIMOZIONE (vecchio PC), poi AGGIUNTA (nuovo PC)
+        # -----------------------------
 
-        # Riga rimozione se vecchio asset presente
+        # Se esiste un vecchio asset, crea riga di rimozione riferimenti
         if old_pc:
-            rows_rif.append([
-                old_pc, "", "", mail, "", mobile_q, "", display_q, "", ""
-            ])
+            row_remove = [""] * 10
+            row_remove[0] = old_pc                 # Computer
+            row_remove[3] = mail                   # remove_mail
+            row_remove[5] = mobile_q               # remove_mobile
+            row_remove[7] = display_q              # remove_userprincipalname
+            rows_rif.append(row_remove)
 
-        # CSV descrizione
-        rows_desc.append([
-            quote_if_value(utenza), "", "", "", "", "", "", "", "", "", "",
-            quote_if_value(nuovo_pc), "", "", "", "", "", "", "", "", "", ""
-        ])
+        # Riga di aggiunta riferimenti per il nuovo PC (sempre)
+        row_add = [""] * 10
+        row_add[0] = nuovo_pc                      # Computer
+        row_add[2] = mail                          # add_mail
+        row_add[4] = mobile_q                      # add_mobile
+        row_add[6] = display_q                     # add_userprincipalname
+        rows_rif.append(row_add)
+
+        # -----------------------------
+        # CSV 2: DESCRITION (23 colonne)
+        # sAMAccountName (col 0) e Description (col 11) valorizzati, resto vuoto
+        # -----------------------------
+        row_desc = [""] * 23
+        row_desc[0]  = quote_if_value(utenza)      # sAMAccountName
+        row_desc[11] = quote_if_value(nuovo_pc)    # Description
+        rows_desc.append(row_desc)
 
     if valid_pairs == 0:
-        st.warning("Nessuna combinazione valida.")
+        st.warning("Nessuna combinazione valida: inserisci almeno una riga con **NuovoPC** e **samaccountname**.")
         st.stop()
 
+    # Serializza CSV in memoria
     buf1 = StringIO()
     w1 = csv.writer(buf1, lineterminator="\n")
     w1.writerow(header_rif)
@@ -187,14 +217,28 @@ if generate:
     w2.writerow(header_desc)
     w2.writerows(rows_desc)
 
-    st.success(f"CSV generati: {file1_name} e {file2_name}")
+    # Esito & Download
+    st.success(f"CSV generati: {file1_name} (righe: {len(rows_rif)}) e {file2_name} (righe: {len(rows_desc)})")
     if warnings:
         st.warning("\n".join(warnings))
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.download_button("⬇️ Scarica CSV Riferimenti", buf1.getvalue().encode("utf-8"), file_name=file1_name)
-        st.dataframe(pd.DataFrame(rows_rif, columns=header_rif).head(50))
+        st.download_button(
+            "⬇️ Scarica CSV Riferimenti",
+            data=buf1.getvalue().encode("utf-8"),
+            file_name=file1_name,
+            mime="text/csv"
+        )
+        st.markdown("**Anteprima Riferimenti**")
+        st.dataframe(pd.DataFrame(rows_rif, columns=header_rif).head(50), use_container_width=True)
+
     with col_b:
-        st.download_button("⬇️ Scarica CSV Descrition", buf2.getvalue().encode("utf-8"), file_name=file2_name)
-        st.dataframe(pd.DataFrame(rows_desc, columns=header_desc).head(50))
+        st.download_button(
+            "⬇️ Scarica CSV Descrition",
+            data=buf2.getvalue().encode("utf-8"),
+            file_name=file2_name,
+            mime="text/csv"
+        )
+        st.markdown("**Anteprima Descrition**")
+        st.dataframe(pd.DataFrame(rows_desc, columns=header_desc).head(50), use_container_width=True)
