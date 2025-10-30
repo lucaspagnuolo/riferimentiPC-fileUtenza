@@ -198,8 +198,8 @@ if generate:
         # sAMAccountName (col 0) e Description (col 11) valorizzati, resto vuoto
         # -----------------------------
         row_desc = [""] * 23
-        row_desc[0]  = quote_if_value(utenza)      # sAMAccountName
-        row_desc[11] = quote_if_value(nuovo_pc)    # Description
+        row_desc[0]  = utenza      # sAMAccountName
+        row_desc[11] = nuovo_pc    # Description
         rows_desc.append(row_desc)
 
     if valid_pairs == 0:
