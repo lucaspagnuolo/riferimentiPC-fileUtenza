@@ -46,14 +46,26 @@ def get_col_case_insensitive(df: pd.DataFrame, wanted: str) -> pd.Series:
             return df[c]
     raise KeyError(f"Colonna richiesta '{wanted}' non trovata nell'Excel caricato.")
 
-def extract_sam_from_mail(mail_val: str) -> str:
+def extract_sam_from_description(desc_val: str) -> str:
     """
-    Estrae il samaccountname da un indirizzo email del tipo {sam}@consip.it.
+    Estrae il samaccountname dalla colonna Description con formato:
+    "... - QUALCOSA - {sam} - DATA ORA"
+    Strategia robusta: split per ' - ' e prendi il token immediatamente prima dell'ultimo.
+    Esempio token: [..., '{sam}', '17/02/2025 09:24'] -> tokens[-2]
+    Rimuove eventuali parentesi graffe.
     """
-    s = normalize_str(mail_val)
-    if "@" in s:
-        return s.split("@", 1)[0].strip()
-    return s
+    s = normalize_str(desc_val)
+    if not s:
+        return ""
+    parts = [p.strip() for p in s.split(" - ")]
+    if len(parts) >= 2:
+        candidate = parts[-2]
+        # Rimuovi eventuali delimitatori come { } o < >
+        if (candidate.startswith("{") and candidate.endswith("}")) or \
+           (candidate.startswith("<") and candidate.endswith(">")):
+            candidate = candidate[1:-1].strip()
+        return candidate
+    return ""
 
 # -----------------------------
 # Input: file & nomi output
@@ -112,12 +124,13 @@ if generate:
     # Lettura colonne richieste
     # ============================
     try:
-        col_mail            = get_col_case_insensitive(raw_df, "Mail")
-        col_upn             = get_col_case_insensitive(raw_df, "userPrincipalName")
-        col_mobile          = get_col_case_insensitive(raw_df, "Mobile")
-        col_name_oldpc      = get_col_case_insensitive(raw_df, "Name")  # vecchio asset
-        col_enabled         = get_col_case_insensitive(raw_df, "Enabled")
-        col_distinguished   = get_col_case_insensitive(raw_df, "DistinguishedName")
+        col_description     = get_col_case_insensitive(raw_df, "Description")          # J -> estrae sam
+        col_mail            = get_col_case_insensitive(raw_df, "Mail")                 # K -> add_mail
+        col_mobile          = get_col_case_insensitive(raw_df, "Mobile")               # L -> add_mobile
+        col_upn             = get_col_case_insensitive(raw_df, "userPrincipalName")    # N -> add_userprincipalname (display)
+        col_name_oldpc      = get_col_case_insensitive(raw_df, "Name")                 # vecchio asset
+        col_enabled         = get_col_case_insensitive(raw_df, "Enabled")              # F
+        col_distinguished   = get_col_case_insensitive(raw_df, "DistinguishedName")    # E
     except KeyError as ke:
         st.error(str(ke))
         st.stop()
@@ -133,19 +146,21 @@ if generate:
         st.stop()
 
     # Rilettura colonne dal df filtrato (per avere gli indici coerenti)
+    f_description   = get_col_case_insensitive(filtered_df, "Description").astype(str)
     f_mail          = get_col_case_insensitive(filtered_df, "Mail").astype(str)
-    f_upn           = get_col_case_insensitive(filtered_df, "userPrincipalName").astype(str)
     f_mobile        = get_col_case_insensitive(filtered_df, "Mobile").astype(str)
+    f_upn           = get_col_case_insensitive(filtered_df, "userPrincipalName").astype(str)
     f_name_oldpc    = get_col_case_insensitive(filtered_df, "Name").astype(str)
     f_dn            = get_col_case_insensitive(filtered_df, "DistinguishedName").astype(str)
 
     # Costruzione DF di lavoro
     estr_df = pd.DataFrame({
-        "samaccountname": f_mail.map(extract_sam_from_mail),   # ricavato da Mail
-        "mail":           f_mail.map(normalize_str),           # mail originale
-        "mobile":         f_mobile.map(normalize_str),
-        "display":        f_upn.map(normalize_str),            # Name (display) = userPrincipalName
-        "old_computer":   f_name_oldpc.map(normalize_str),     # vecchio asset
+        # samaccountname ora deriva da Description (token prima dell'ultimo ' - ')
+        "samaccountname": f_description.map(extract_sam_from_description),
+        "mail":           f_mail.map(normalize_str),         # add_mail
+        "mobile":         f_mobile.map(normalize_str),       # add_mobile
+        "display":        f_upn.map(normalize_str),          # add_userprincipalname (display)
+        "old_computer":   f_name_oldpc.map(normalize_str),   # vecchio asset
         "dn":             f_dn.map(normalize_str)
     })
 
@@ -181,6 +196,7 @@ if generate:
 
         if not nuovo_pc or not utenza:
             continue
+
         valid_pairs += 1
 
         # Match su samaccountname (case-insensitive)
