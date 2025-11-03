@@ -77,10 +77,10 @@ def extract_sam_from_description(desc_val: str) -> str:
 # -----------------------------
 # Input: file & nomi output
 # -----------------------------
-st.subheader("1) Carica il file Excel estr_device (.xlsx)")
+st.subheader("1.a) Carica il file Excel estr_device (.xlsx)")
 uploaded_device = st.file_uploader("Seleziona il file estr_device", type=["xlsx"], key="estr_device")
 
-st.subheader("1b) (Opzionale) Carica il file Excel estr_dati (.xlsx) per MAIL/MOBILE/DISPLAYNAME")
+st.subheader("1.b) Carica il file Excel estr_dati (.xlsx) per MAIL/MOBILE/DISPLAYNAME")
 uploaded_dati = st.file_uploader("Seleziona il file estr_dati", type=["xlsx"], key="estr_dati")
 
 st.subheader("2) Nomi file di output (puoi cambiarli)")
