@@ -3,6 +3,7 @@ import pandas as pd
 from io import StringIO
 from datetime import date
 import csv
+
 # -----------------------------
 # Configurazione pagina
 # -----------------------------
@@ -35,25 +36,30 @@ def quote_if_value(val: str) -> str:
         return ""
     return f'"{sval}"'
 
-def pick_column(series_names, df: pd.DataFrame, fallback_idx=None) -> pd.Series:
+def get_col_case_insensitive(df: pd.DataFrame, wanted: str) -> pd.Series:
     """
-    Trova la colonna per nome (case-insensitive); se non la trova usa l'indice fallback.
+    Restituisce la colonna per nome (case-insensitive) o solleva un errore se non presente.
     """
-    cols_lower = {str(c).strip().lower(): c for c in df.columns}
-    for candidate in series_names:
-        key = str(candidate).strip().lower()
-        if key in cols_lower:
-            return df[cols_lower[key]]
-    if fallback_idx is not None and 0 <= fallback_idx < df.shape[1]:
-        return df.iloc[:, fallback_idx]
-    # Nessun match: crea una Serie di None della stessa lunghezza del DF
-    return pd.Series([None] * len(df))
+    wanted_l = wanted.strip().lower()
+    for c in df.columns:
+        if str(c).strip().lower() == wanted_l:
+            return df[c]
+    raise KeyError(f"Colonna richiesta '{wanted}' non trovata nell'Excel caricato.")
+
+def extract_sam_from_mail(mail_val: str) -> str:
+    """
+    Estrae il samaccountname da un indirizzo email del tipo {sam}@consip.it.
+    """
+    s = normalize_str(mail_val)
+    if "@" in s:
+        return s.split("@", 1)[0].strip()
+    return s
 
 # -----------------------------
 # Input: file & nomi output
 # -----------------------------
-st.subheader("1) Carica il file Excel estr_dati (.xlsx)")
-uploaded = st.file_uploader("Seleziona il file estr_dati", type=["xlsx"])
+st.subheader("1) Carica il file Excel estr_device (.xlsx)")
+uploaded = st.file_uploader("Seleziona il file estr_device", type=["xlsx"])
 
 st.subheader("2) Nomi file di output (puoi cambiarli)")
 default_file1 = f"{today_yyyymmdd()}_Computer_riferimenti.csv"
@@ -89,7 +95,7 @@ generate = st.button("Genera CSV")
 
 if generate:
     if uploaded is None:
-        st.error("Per favore carica prima il file Excel estr_dati.")
+        st.error("Per favore carica prima il file Excel estr_device.")
         st.stop()
 
     # Leggi Excel
@@ -99,32 +105,55 @@ if generate:
         st.error(f"Errore nel leggere l'Excel: {e}")
         st.stop()
 
+    # Normalizza intestazioni
     raw_df.columns = [str(c).strip() for c in raw_df.columns]
 
-    # Mappatura colonne con fallback a posizioni:
-    # A: SamAccountName (0), B: Name (1), E: Mobile (4), J: mail (9), Q: Description (16)
-    col_sam = pick_column(["SamAccountName", "sAMAccountName"], raw_df, fallback_idx=0)
-    col_name = pick_column(["Name"], raw_df, fallback_idx=1)
-    col_mobile = pick_column(["Mobile"], raw_df, fallback_idx=4)
-    col_mail = pick_column(["mail", "Mail", "e-mail", "email"], raw_df, fallback_idx=9)
-    col_desc_old = pick_column(["Description", "Descrizione"], raw_df, fallback_idx=16)
+    # ============================
+    # Lettura colonne richieste
+    # ============================
+    try:
+        col_mail            = get_col_case_insensitive(raw_df, "Mail")
+        col_upn             = get_col_case_insensitive(raw_df, "userPrincipalName")
+        col_mobile          = get_col_case_insensitive(raw_df, "Mobile")
+        col_name_oldpc      = get_col_case_insensitive(raw_df, "Name")  # vecchio asset
+        col_enabled         = get_col_case_insensitive(raw_df, "Enabled")
+        col_distinguished   = get_col_case_insensitive(raw_df, "DistinguishedName")
+    except KeyError as ke:
+        st.error(str(ke))
+        st.stop()
 
-    # ✅ Fix robusto: concat per allineamento per indice ed evitare errori di lunghezza
-    estr_df = pd.concat(
-        [
-            col_sam.rename("samaccountname"),
-            col_name.rename("name"),
-            col_mobile.rename("mobile"),
-            col_mail.rename("mail"),
-            col_desc_old.rename("description_old"),
-        ],
-        axis=1
-    ).astype(str)
+    # ============================
+    # Filtro: Enabled == True
+    # ============================
+    enabled_mask = col_enabled.astype(str).str.strip().str.lower() == "true"
+    filtered_df = raw_df.loc[enabled_mask].copy()
 
-    # Colonna normalizzata per il match case-insensitive
+    if filtered_df.empty:
+        st.warning("Nessun record 'Enabled = True' trovato in estr_device: nulla da elaborare.")
+        st.stop()
+
+    # Rilettura colonne dal df filtrato (per avere gli indici coerenti)
+    f_mail          = get_col_case_insensitive(filtered_df, "Mail").astype(str)
+    f_upn           = get_col_case_insensitive(filtered_df, "userPrincipalName").astype(str)
+    f_mobile        = get_col_case_insensitive(filtered_df, "Mobile").astype(str)
+    f_name_oldpc    = get_col_case_insensitive(filtered_df, "Name").astype(str)
+    f_dn            = get_col_case_insensitive(filtered_df, "DistinguishedName").astype(str)
+
+    # Costruzione DF di lavoro
+    estr_df = pd.DataFrame({
+        "samaccountname": f_mail.map(extract_sam_from_mail),   # ricavato da Mail
+        "mail":           f_mail.map(normalize_str),           # mail originale
+        "mobile":         f_mobile.map(normalize_str),
+        "display":        f_upn.map(normalize_str),            # Name (display) = userPrincipalName
+        "old_computer":   f_name_oldpc.map(normalize_str),     # vecchio asset
+        "dn":             f_dn.map(normalize_str)
+    })
+
     estr_df["sam_norm"] = estr_df["samaccountname"].map(lower_norm)
 
-    # Header dei due CSV
+    # -----------------------------
+    # Header dei CSV
+    # -----------------------------
     header_rif = [
         "Computer", "OU",
         "add_mail", "remove_mail",
@@ -143,59 +172,64 @@ if generate:
     rows_rif = []
     rows_desc = []
     warnings = []
+    alerts = []
     valid_pairs = 0
 
     for _, r in pairs_df.iterrows():
         nuovo_pc = normalize_str(r.get("NuovoPC", ""))
-        utenza = normalize_str(r.get("samaccountname", ""))
+        utenza   = normalize_str(r.get("samaccountname", ""))
 
         if not nuovo_pc or not utenza:
             continue
-
         valid_pairs += 1
 
-        # Match su SamAccountName
+        # Match su samaccountname (case-insensitive)
         match = estr_df[estr_df["sam_norm"] == utenza.lower()]
+
         if match.empty:
-            warnings.append(f"• Utente '{utenza}' non trovato nel file estr_dati.")
-            mail = ""                              # add_mail/remove_mail -> stringa (non quotata)
-            mobile_q = quote_if_value("")          # add/remove_mobile -> quotata se presente
-            display_q = quote_if_value("")         # add/remove_userprincipalname -> quotata se presente
-            old_pc = ""
+            warnings.append(f"• Utente '{utenza}' non trovato tra i record con Enabled = True in estr_device.")
+            mail = ""
+            mobile_q  = ""
+            display_q = ""
+            old_pc    = ""
+            dn_val    = ""
         else:
             rec = match.iloc[0]
-            mail = normalize_str(rec["mail"])
-            mobile_q = quote_if_value(normalize_str(rec["mobile"]))
-            display_q = quote_if_value(normalize_str(rec["name"]))
-            old_pc = normalize_str(rec["description_old"])
-            if old_pc.lower() == "nan":
-                old_pc = ""
+            mail      = normalize_str(rec.get("mail", ""))
+            mobile_q  = quote_if_value(normalize_str(rec.get("mobile", "")))
+            display_q = quote_if_value(normalize_str(rec.get("display", "")))
+            old_pc    = normalize_str(rec.get("old_computer", ""))
+            dn_val    = normalize_str(rec.get("dn", ""))
+
+            # Alert: vecchio asset con OU=PDL in dismissione nel DN
+            if old_pc and "ou=pdl in dismissione" in dn_val.lower():
+                alerts.append(
+                    f"⚠️ Vecchio asset '{old_pc}' è in 'OU=PDL in dismissione' (DN: {dn_val}) per l'utenza '{utenza}'."
+                )
 
         # -----------------------------
         # CSV 1: RIFERIMENTI
-        # Ordinamento richiesto: prima RIMOZIONE (vecchio PC), poi AGGIUNTA (nuovo PC)
         # -----------------------------
 
-        # Se esiste un vecchio asset, crea riga di rimozione riferimenti
+        # 1) RIMOZIONE: SOLO 'SI' + Computer=old_pc (se presente)
         if old_pc:
             row_remove = [""] * 10
-            row_remove[0] = old_pc                 # Computer
-            row_remove[3] = mail                   # remove_mail
-            row_remove[5] = mobile_q               # remove_mobile
-            row_remove[7] = display_q              # remove_userprincipalname
+            row_remove[0] = old_pc   # Computer
+            row_remove[3] = "SI"     # remove_mail
+            row_remove[5] = "SI"     # remove_mobile
+            row_remove[7] = "SI"     # remove_userprincipalname
             rows_rif.append(row_remove)
 
-        # Riga di aggiunta riferimenti per il nuovo PC (sempre)
+        # 2) AGGIUNTA: usa i dati letti da estr_device
         row_add = [""] * 10
-        row_add[0] = nuovo_pc                      # Computer
-        row_add[2] = mail                          # add_mail
-        row_add[4] = mobile_q                      # add_mobile
-        row_add[6] = display_q                     # add_userprincipalname
+        row_add[0] = nuovo_pc      # Computer
+        row_add[2] = mail          # add_mail (non quotato)
+        row_add[4] = mobile_q      # add_mobile (quotato se presente)
+        row_add[6] = display_q     # add_userprincipalname (quotato se presente)
         rows_rif.append(row_add)
 
         # -----------------------------
         # CSV 2: DESCRITION (23 colonne)
-        # sAMAccountName (col 0) e Description (col 11) valorizzati, resto vuoto
         # -----------------------------
         row_desc = [""] * 23
         row_desc[0]  = utenza      # sAMAccountName
@@ -217,11 +251,16 @@ if generate:
     w2.writerow(header_desc)
     w2.writerows(rows_desc)
 
-    # Esito & Download
+    # Esito & Messaggi
     st.success(f"CSV generati: {file1_name} (righe: {len(rows_rif)}) e {file2_name} (righe: {len(rows_desc)})")
-    if warnings:
-        st.warning("\n".join(warnings))
 
+    if warnings:
+        st.warning("**Avvisi (match non trovati):**\n" + "\n".join(warnings))
+
+    if alerts:
+        st.info("**Alert (vecchi asset in OU=PDL in dismissione):**\n" + "\n".join(alerts))
+
+    # Download + Anteprime
     col_a, col_b = st.columns(2)
     with col_a:
         st.download_button(
@@ -242,3 +281,4 @@ if generate:
         )
         st.markdown("**Anteprima Descrition**")
         st.dataframe(pd.DataFrame(rows_desc, columns=header_desc).head(50), use_container_width=True)
+``
