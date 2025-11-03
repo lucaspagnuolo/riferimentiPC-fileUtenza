@@ -26,8 +26,7 @@ def lower_norm(val) -> str:
 
 def quote_if_value(val: str) -> str:
     """
-    Aggiunge doppi apici come nei tuoi script originali
-    (vuoto o 'nan' -> stringa vuota).
+    Aggiunge doppi apici (""val"") solo se c'è un valore non vuoto/non 'nan'.
     """
     if val is None:
         return ""
@@ -56,7 +55,6 @@ def pick_ci(df: pd.DataFrame, candidates) -> pd.Series | None:
         if key in cols:
             return df[cols[key]]
     return None
-
 def extract_sam_from_description(desc_val: str) -> str:
     """
     Estrae il samaccountname dalla colonna Description con formato:
@@ -82,7 +80,7 @@ def extract_sam_from_description(desc_val: str) -> str:
 st.subheader("1) Carica il file Excel estr_device (.xlsx)")
 uploaded_device = st.file_uploader("Seleziona il file estr_device", type=["xlsx"], key="estr_device")
 
-st.subheader("1b) (Opzionale) Carica il file Excel estr_dati (.xlsx) per MAIL/MOBILE più affidabili")
+st.subheader("1b) (Opzionale) Carica il file Excel estr_dati (.xlsx) per MAIL/MOBILE/DISPLAYNAME")
 uploaded_dati = st.file_uploader("Seleziona il file estr_dati", type=["xlsx"], key="estr_dati")
 
 st.subheader("2) Nomi file di output (puoi cambiarli)")
@@ -136,7 +134,7 @@ if generate:
         dev_description   = get_col_case_insensitive(raw_dev, "Description")          # J -> estrae sam
         dev_mail          = get_col_case_insensitive(raw_dev, "Mail")                 # K -> fallback add_mail
         dev_mobile        = get_col_case_insensitive(raw_dev, "Mobile")               # L -> fallback add_mobile
-        dev_upn           = get_col_case_insensitive(raw_dev, "userPrincipalName")    # N -> add_userprincipalname
+        dev_upn           = get_col_case_insensitive(raw_dev, "userPrincipalName")    # N -> fallback add_userprincipalname
         dev_name_oldpc    = get_col_case_insensitive(raw_dev, "Name")                 # vecchio asset
         dev_enabled       = get_col_case_insensitive(raw_dev, "Enabled")              # F
         dev_dn            = get_col_case_insensitive(raw_dev, "DistinguishedName")    # E
@@ -164,14 +162,15 @@ if generate:
         "samaccountname": f_description.map(extract_sam_from_description),
         "mail_dev":       f_mail.map(normalize_str),         # fallback
         "mobile_dev":     f_mobile.map(normalize_str),       # fallback
-        "display":        f_upn.map(normalize_str),          # add_userprincipalname
+        "upn_dev":        f_upn.map(normalize_str),          # fallback per add_userprincipalname
         "old_computer":   f_name_oldpc.map(normalize_str),   # vecchio asset
         "dn":             f_dn.map(normalize_str)
     })
     estr_df["sam_norm"] = estr_df["samaccountname"].map(lower_norm)
 
     # ============== Lettura (opzionale) estr_dati ==============
-    # Obiettivo: ricavare mail/mobile "autoritative" e fare merge su sam_norm
+    # Obiettivo: ricavare mail/mobile/displayname più "autoritative" e fare merge su sam_norm
+    dati_loaded = False
     if uploaded_dati is not None:
         try:
             raw_dati = pd.read_excel(uploaded_dati, dtype=str)
@@ -185,16 +184,19 @@ if generate:
         # - SAM: "SamAccountName"/"sAMAccountName" (A)
         # - Mobile: "Mobile" (E)
         # - mail: "mail"/"Mail"/"e-mail"/"email" (J)
-        sam_dati = pick_ci(raw_dati, ["SamAccountName", "sAMAccountName"])
-        mail_dati = pick_ci(raw_dati, ["mail", "Mail", "e-mail", "email"])
-        mobile_dati = pick_ci(raw_dati, ["Mobile", "mobile"])
+        # - DisplayName: "DisplayName" (preferito), fallback "Name"/"cn"
+        sam_dati        = pick_ci(raw_dati, ["SamAccountName", "sAMAccountName"])
+        mail_dati       = pick_ci(raw_dati, ["mail", "Mail", "e-mail", "email"])
+        mobile_dati     = pick_ci(raw_dati, ["Mobile", "mobile"])
+        display_dati    = pick_ci(raw_dati, ["DisplayName", "displayName", "Display Name", "Name", "cn"])
 
         if sam_dati is None:
             st.error("In estr_dati non è stata trovata la colonna 'SamAccountName'/'sAMAccountName'. Impossibile allineare i dati.")
             st.stop()
 
-        # Normalizza serie (le altre possono essere None)
+        # Normalizza serie (le altre possono essere None -> serie vuote)
         sam_dati = sam_dati.astype(str)
+
         if mail_dati is None:
             mail_dati = pd.Series([""] * len(raw_dati))
             st.warning("In estr_dati non è stata trovata la colonna 'mail'/'Mail'/'e-mail'/'email'. Userò il fallback da estr_device.")
@@ -207,10 +209,17 @@ if generate:
         else:
             mobile_dati = mobile_dati.astype(str)
 
+        if display_dati is None:
+            display_dati = pd.Series([""] * len(raw_dati))
+            st.warning("In estr_dati non è stata trovata la colonna 'DisplayName' (verrà usato userPrincipalName da estr_device come fallback).")
+        else:
+            display_dati = display_dati.astype(str)
+
         dati_map = pd.DataFrame({
-            "sam_norm": sam_dati.map(lower_norm),
-            "mail_dati": mail_dati.map(normalize_str),
-            "mobile_dati": mobile_dati.map(normalize_str),
+            "sam_norm":        sam_dati.map(lower_norm),
+            "mail_dati":       mail_dati.map(normalize_str),
+            "mobile_dati":     mobile_dati.map(normalize_str),
+            "displayname_dati":display_dati.map(normalize_str),
         })
 
         # Deduplica per sam_norm mantenendo la prima occorrenza
@@ -218,10 +227,12 @@ if generate:
 
         # Merge su estr_df
         estr_df = estr_df.merge(dati_map, on="sam_norm", how="left")
+        dati_loaded = True
     else:
         # Se non caricato estr_dati, crea colonne vuote per uniformità
         estr_df["mail_dati"] = ""
         estr_df["mobile_dati"] = ""
+        estr_df["displayname_dati"] = ""
 
     # -----------------------------
     # Header dei CSV
@@ -255,7 +266,6 @@ if generate:
             continue
 
         valid_pairs += 1
-
         # Match su samaccountname (case-insensitive)
         match = estr_df[estr_df["sam_norm"] == utenza.lower()]
 
@@ -263,21 +273,22 @@ if generate:
             warnings.append(f"• Utente '{utenza}' non trovato tra i record con Enabled = True in estr_device.")
             add_mail_val = ""
             add_mobile_val = ""
-            display_q = ""
+            add_display_val = ""  # per add_userprincipalname
             old_pc = ""
             dn_val = ""
         else:
             rec = match.iloc[0]
 
             # Precedenza: estr_dati -> estr_device
-            mail_pref   = normalize_str(rec.get("mail_dati", "")) or normalize_str(rec.get("mail_dev", ""))
-            mobile_pref = normalize_str(rec.get("mobile_dati", "")) or normalize_str(rec.get("mobile_dev", ""))
+            mail_pref       = normalize_str(rec.get("mail_dati", "")) or normalize_str(rec.get("mail_dev", ""))
+            mobile_pref     = normalize_str(rec.get("mobile_dati", "")) or normalize_str(rec.get("mobile_dev", ""))
+            display_pref    = normalize_str(rec.get("displayname_dati", "")) or normalize_str(rec.get("upn_dev", ""))
 
-            add_mail_val   = mail_pref                               # non quotato
-            add_mobile_val = quote_if_value(mobile_pref)             # quotato se presente
-            display_q      = quote_if_value(normalize_str(rec.get("display", "")))
-            old_pc         = normalize_str(rec.get("old_computer", ""))
-            dn_val         = normalize_str(rec.get("dn", ""))
+            add_mail_val    = mail_pref                                  # non quotato
+            add_mobile_val  = quote_if_value(mobile_pref)                 # quotato se presente
+            add_display_val = quote_if_value(display_pref)                # add_userprincipalname (da DisplayName o UPN)
+            old_pc          = normalize_str(rec.get("old_computer", ""))
+            dn_val          = normalize_str(rec.get("dn", ""))
 
             # Alert: vecchio asset con OU=PDL in dismissione nel DN
             if old_pc and "ou=pdl in dismissione" in dn_val.lower():
@@ -303,7 +314,7 @@ if generate:
         row_add[0] = nuovo_pc
         row_add[2] = add_mail_val
         row_add[4] = add_mobile_val
-        row_add[6] = display_q
+        row_add[6] = add_display_val  # <- add_userprincipalname = DisplayName (estr_dati) -> fallback UPN (estr_device)
         rows_rif.append(row_add)
 
         # -----------------------------
@@ -331,6 +342,9 @@ if generate:
 
     # Esito & Messaggi
     st.success(f"CSV generati: {file1_name} (righe: {len(rows_rif)}) e {file2_name} (righe: {len(rows_desc)})")
+
+    if not dati_loaded:
+        st.info("Non hai caricato 'estr_dati': userò i valori di 'estr_device' per mail/mobile e userPrincipalName per add_userprincipalname (fallback).")
 
     if warnings:
         st.warning("**Avvisi (match non trovati):**\n" + "\n".join(warnings))
