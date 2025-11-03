@@ -46,13 +46,23 @@ def get_col_case_insensitive(df: pd.DataFrame, wanted: str) -> pd.Series:
             return df[c]
     raise KeyError(f"Colonna richiesta '{wanted}' non trovata nell'Excel caricato.")
 
+def pick_ci(df: pd.DataFrame, candidates) -> pd.Series | None:
+    """
+    Ritorna la prima colonna trovata tra i nomi candidati (case-insensitive), altrimenti None.
+    """
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key in cols:
+            return df[cols[key]]
+    return None
+
 def extract_sam_from_description(desc_val: str) -> str:
     """
     Estrae il samaccountname dalla colonna Description con formato:
     "... - QUALCOSA - {sam} - DATA ORA"
-    Strategia robusta: split per ' - ' e prendi il token immediatamente prima dell'ultimo.
-    Esempio token: [..., '{sam}', '17/02/2025 09:24'] -> tokens[-2]
-    Rimuove eventuali parentesi graffe.
+    Strategia: split per ' - ' e prendi il token immediatamente prima dell'ultimo.
+    Rimuove eventuali parentesi graffe { } o < >.
     """
     s = normalize_str(desc_val)
     if not s:
@@ -60,7 +70,6 @@ def extract_sam_from_description(desc_val: str) -> str:
     parts = [p.strip() for p in s.split(" - ")]
     if len(parts) >= 2:
         candidate = parts[-2]
-        # Rimuovi eventuali delimitatori come { } o < >
         if (candidate.startswith("{") and candidate.endswith("}")) or \
            (candidate.startswith("<") and candidate.endswith(">")):
             candidate = candidate[1:-1].strip()
@@ -71,7 +80,10 @@ def extract_sam_from_description(desc_val: str) -> str:
 # Input: file & nomi output
 # -----------------------------
 st.subheader("1) Carica il file Excel estr_device (.xlsx)")
-uploaded = st.file_uploader("Seleziona il file estr_device", type=["xlsx"])
+uploaded_device = st.file_uploader("Seleziona il file estr_device", type=["xlsx"], key="estr_device")
+
+st.subheader("1b) (Opzionale) Carica il file Excel estr_dati (.xlsx) per MAIL/MOBILE più affidabili")
+uploaded_dati = st.file_uploader("Seleziona il file estr_dati", type=["xlsx"], key="estr_dati")
 
 st.subheader("2) Nomi file di output (puoi cambiarli)")
 default_file1 = f"{today_yyyymmdd()}_Computer_riferimenti.csv"
@@ -106,65 +118,110 @@ st.session_state["pairs_df"] = pairs_df
 generate = st.button("Genera CSV")
 
 if generate:
-    if uploaded is None:
+    if uploaded_device is None:
         st.error("Per favore carica prima il file Excel estr_device.")
         st.stop()
 
-    # Leggi Excel
+    # ============== Lettura estr_device ==============
     try:
-        raw_df = pd.read_excel(uploaded, dtype=str)
+        raw_dev = pd.read_excel(uploaded_device, dtype=str)
     except Exception as e:
-        st.error(f"Errore nel leggere l'Excel: {e}")
+        st.error(f"Errore nel leggere estr_device: {e}")
         st.stop()
 
-    # Normalizza intestazioni
-    raw_df.columns = [str(c).strip() for c in raw_df.columns]
+    raw_dev.columns = [str(c).strip() for c in raw_dev.columns]
 
-    # ============================
-    # Lettura colonne richieste
-    # ============================
+    # Colonne necessarie in estr_device
     try:
-        col_description     = get_col_case_insensitive(raw_df, "Description")          # J -> estrae sam
-        col_mail            = get_col_case_insensitive(raw_df, "Mail")                 # K -> add_mail
-        col_mobile          = get_col_case_insensitive(raw_df, "Mobile")               # L -> add_mobile
-        col_upn             = get_col_case_insensitive(raw_df, "userPrincipalName")    # N -> add_userprincipalname (display)
-        col_name_oldpc      = get_col_case_insensitive(raw_df, "Name")                 # vecchio asset
-        col_enabled         = get_col_case_insensitive(raw_df, "Enabled")              # F
-        col_distinguished   = get_col_case_insensitive(raw_df, "DistinguishedName")    # E
+        dev_description   = get_col_case_insensitive(raw_dev, "Description")          # J -> estrae sam
+        dev_mail          = get_col_case_insensitive(raw_dev, "Mail")                 # K -> fallback add_mail
+        dev_mobile        = get_col_case_insensitive(raw_dev, "Mobile")               # L -> fallback add_mobile
+        dev_upn           = get_col_case_insensitive(raw_dev, "userPrincipalName")    # N -> add_userprincipalname
+        dev_name_oldpc    = get_col_case_insensitive(raw_dev, "Name")                 # vecchio asset
+        dev_enabled       = get_col_case_insensitive(raw_dev, "Enabled")              # F
+        dev_dn            = get_col_case_insensitive(raw_dev, "DistinguishedName")    # E
     except KeyError as ke:
         st.error(str(ke))
         st.stop()
 
-    # ============================
-    # Filtro: Enabled == True
-    # ============================
-    enabled_mask = col_enabled.astype(str).str.strip().str.lower() == "true"
-    filtered_df = raw_df.loc[enabled_mask].copy()
+    # Filtro Enabled = True
+    dev_mask = dev_enabled.astype(str).str.strip().str.lower() == "true"
+    fdev = raw_dev.loc[dev_mask].copy()
 
-    if filtered_df.empty:
+    if fdev.empty:
         st.warning("Nessun record 'Enabled = True' trovato in estr_device: nulla da elaborare.")
         st.stop()
 
-    # Rilettura colonne dal df filtrato (per avere gli indici coerenti)
-    f_description   = get_col_case_insensitive(filtered_df, "Description").astype(str)
-    f_mail          = get_col_case_insensitive(filtered_df, "Mail").astype(str)
-    f_mobile        = get_col_case_insensitive(filtered_df, "Mobile").astype(str)
-    f_upn           = get_col_case_insensitive(filtered_df, "userPrincipalName").astype(str)
-    f_name_oldpc    = get_col_case_insensitive(filtered_df, "Name").astype(str)
-    f_dn            = get_col_case_insensitive(filtered_df, "DistinguishedName").astype(str)
+    # Rilettura dal df filtrato
+    f_description   = get_col_case_insensitive(fdev, "Description").astype(str)
+    f_mail          = get_col_case_insensitive(fdev, "Mail").astype(str)
+    f_mobile        = get_col_case_insensitive(fdev, "Mobile").astype(str)
+    f_upn           = get_col_case_insensitive(fdev, "userPrincipalName").astype(str)
+    f_name_oldpc    = get_col_case_insensitive(fdev, "Name").astype(str)
+    f_dn            = get_col_case_insensitive(fdev, "DistinguishedName").astype(str)
 
-    # Costruzione DF di lavoro
     estr_df = pd.DataFrame({
-        # samaccountname ora deriva da Description (token prima dell'ultimo ' - ')
         "samaccountname": f_description.map(extract_sam_from_description),
-        "mail":           f_mail.map(normalize_str),         # add_mail
-        "mobile":         f_mobile.map(normalize_str),       # add_mobile
-        "display":        f_upn.map(normalize_str),          # add_userprincipalname (display)
+        "mail_dev":       f_mail.map(normalize_str),         # fallback
+        "mobile_dev":     f_mobile.map(normalize_str),       # fallback
+        "display":        f_upn.map(normalize_str),          # add_userprincipalname
         "old_computer":   f_name_oldpc.map(normalize_str),   # vecchio asset
         "dn":             f_dn.map(normalize_str)
     })
-
     estr_df["sam_norm"] = estr_df["samaccountname"].map(lower_norm)
+
+    # ============== Lettura (opzionale) estr_dati ==============
+    # Obiettivo: ricavare mail/mobile "autoritative" e fare merge su sam_norm
+    if uploaded_dati is not None:
+        try:
+            raw_dati = pd.read_excel(uploaded_dati, dtype=str)
+        except Exception as e:
+            st.error(f"Errore nel leggere estr_dati: {e}")
+            st.stop()
+
+        raw_dati.columns = [str(c).strip() for c in raw_dati.columns]
+
+        # Candidati come da storico:
+        # - SAM: "SamAccountName"/"sAMAccountName" (A)
+        # - Mobile: "Mobile" (E)
+        # - mail: "mail"/"Mail"/"e-mail"/"email" (J)
+        sam_dati = pick_ci(raw_dati, ["SamAccountName", "sAMAccountName"])
+        mail_dati = pick_ci(raw_dati, ["mail", "Mail", "e-mail", "email"])
+        mobile_dati = pick_ci(raw_dati, ["Mobile", "mobile"])
+
+        if sam_dati is None:
+            st.error("In estr_dati non è stata trovata la colonna 'SamAccountName'/'sAMAccountName'. Impossibile allineare i dati.")
+            st.stop()
+
+        # Normalizza serie (le altre possono essere None)
+        sam_dati = sam_dati.astype(str)
+        if mail_dati is None:
+            mail_dati = pd.Series([""] * len(raw_dati))
+            st.warning("In estr_dati non è stata trovata la colonna 'mail'/'Mail'/'e-mail'/'email'. Userò il fallback da estr_device.")
+        else:
+            mail_dati = mail_dati.astype(str)
+
+        if mobile_dati is None:
+            mobile_dati = pd.Series([""] * len(raw_dati))
+            st.warning("In estr_dati non è stata trovata la colonna 'Mobile'. Userò il fallback da estr_device.")
+        else:
+            mobile_dati = mobile_dati.astype(str)
+
+        dati_map = pd.DataFrame({
+            "sam_norm": sam_dati.map(lower_norm),
+            "mail_dati": mail_dati.map(normalize_str),
+            "mobile_dati": mobile_dati.map(normalize_str),
+        })
+
+        # Deduplica per sam_norm mantenendo la prima occorrenza
+        dati_map = dati_map.drop_duplicates(subset=["sam_norm"], keep="first")
+
+        # Merge su estr_df
+        estr_df = estr_df.merge(dati_map, on="sam_norm", how="left")
+    else:
+        # Se non caricato estr_dati, crea colonne vuote per uniformità
+        estr_df["mail_dati"] = ""
+        estr_df["mobile_dati"] = ""
 
     # -----------------------------
     # Header dei CSV
@@ -204,18 +261,23 @@ if generate:
 
         if match.empty:
             warnings.append(f"• Utente '{utenza}' non trovato tra i record con Enabled = True in estr_device.")
-            mail = ""
-            mobile_q  = ""
+            add_mail_val = ""
+            add_mobile_val = ""
             display_q = ""
-            old_pc    = ""
-            dn_val    = ""
+            old_pc = ""
+            dn_val = ""
         else:
             rec = match.iloc[0]
-            mail      = normalize_str(rec.get("mail", ""))
-            mobile_q  = quote_if_value(normalize_str(rec.get("mobile", "")))
-            display_q = quote_if_value(normalize_str(rec.get("display", "")))
-            old_pc    = normalize_str(rec.get("old_computer", ""))
-            dn_val    = normalize_str(rec.get("dn", ""))
+
+            # Precedenza: estr_dati -> estr_device
+            mail_pref   = normalize_str(rec.get("mail_dati", "")) or normalize_str(rec.get("mail_dev", ""))
+            mobile_pref = normalize_str(rec.get("mobile_dati", "")) or normalize_str(rec.get("mobile_dev", ""))
+
+            add_mail_val   = mail_pref                               # non quotato
+            add_mobile_val = quote_if_value(mobile_pref)             # quotato se presente
+            display_q      = quote_if_value(normalize_str(rec.get("display", "")))
+            old_pc         = normalize_str(rec.get("old_computer", ""))
+            dn_val         = normalize_str(rec.get("dn", ""))
 
             # Alert: vecchio asset con OU=PDL in dismissione nel DN
             if old_pc and "ou=pdl in dismissione" in dn_val.lower():
@@ -236,12 +298,12 @@ if generate:
             row_remove[7] = "SI"     # remove_userprincipalname
             rows_rif.append(row_remove)
 
-        # 2) AGGIUNTA: usa i dati letti da estr_device
+        # 2) AGGIUNTA: usa i dati (preferendo estr_dati)
         row_add = [""] * 10
-        row_add[0] = nuovo_pc      # Computer
-        row_add[2] = mail          # add_mail (non quotato)
-        row_add[4] = mobile_q      # add_mobile (quotato se presente)
-        row_add[6] = display_q     # add_userprincipalname (quotato se presente)
+        row_add[0] = nuovo_pc
+        row_add[2] = add_mail_val
+        row_add[4] = add_mobile_val
+        row_add[6] = display_q
         rows_rif.append(row_add)
 
         # -----------------------------
