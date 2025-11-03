@@ -281,4 +281,3 @@ if generate:
         )
         st.markdown("**Anteprima Descrition**")
         st.dataframe(pd.DataFrame(rows_desc, columns=header_desc).head(50), use_container_width=True)
-``
