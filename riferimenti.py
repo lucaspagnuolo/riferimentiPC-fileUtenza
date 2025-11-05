@@ -26,7 +26,7 @@ def lower_norm(val) -> str:
 
 def quote_if_value(val: str) -> str:
     """
-    Aggiunge doppi apici (""val"") solo se c'è un valore non vuoto/non 'nan'.
+    Aggiunge doppi apici ("val") solo se c'è un valore non vuoto/non 'nan'.
     """
     if val is None:
         return ""
@@ -55,6 +55,7 @@ def pick_ci(df: pd.DataFrame, candidates) -> pd.Series | None:
         if key in cols:
             return df[cols[key]]
     return None
+
 def extract_sam_from_description(desc_val: str) -> str:
     """
     Estrae il samaccountname dalla colonna Description con formato:
@@ -216,10 +217,10 @@ if generate:
             display_dati = display_dati.astype(str)
 
         dati_map = pd.DataFrame({
-            "sam_norm":        sam_dati.map(lower_norm),
-            "mail_dati":       mail_dati.map(normalize_str),
-            "mobile_dati":     mobile_dati.map(normalize_str),
-            "displayname_dati":display_dati.map(normalize_str),
+            "sam_norm":         sam_dati.map(lower_norm),
+            "mail_dati":        mail_dati.map(normalize_str),
+            "mobile_dati":      mobile_dati.map(normalize_str),
+            "displayname_dati": display_dati.map(normalize_str),
         })
 
         # Deduplica per sam_norm mantenendo la prima occorrenza
@@ -271,24 +272,30 @@ if generate:
 
         if match.empty:
             warnings.append(f"• Utente '{utenza}' non trovato tra i record con Enabled = True in estr_device.")
-            add_mail_val = ""
-            add_mobile_val = ""
-            add_display_val = ""  # per add_userprincipalname
-            old_pc = ""
-            dn_val = ""
+            # Nessun dato disponibile -> tutti vuoti
+            mail_pref_raw    = ""
+            mobile_pref_raw  = ""
+            display_pref_raw = ""
+            add_mail_val     = ""
+            add_mobile_val   = ""
+            add_display_val  = ""
+            old_pc           = ""
+            dn_val           = ""
         else:
             rec = match.iloc[0]
 
-            # Precedenza: estr_dati -> estr_device
-            mail_pref       = normalize_str(rec.get("mail_dati", "")) or normalize_str(rec.get("mail_dev", ""))
-            mobile_pref     = normalize_str(rec.get("mobile_dati", "")) or normalize_str(rec.get("mobile_dev", ""))
-            display_pref    = normalize_str(rec.get("displayname_dati", "")) or normalize_str(rec.get("upn_dev", ""))
+            # Precedenza: estr_dati -> estr_device (RAW)
+            mail_pref_raw       = normalize_str(rec.get("mail_dati", "")) or normalize_str(rec.get("mail_dev", ""))
+            mobile_pref_raw     = normalize_str(rec.get("mobile_dati", "")) or normalize_str(rec.get("mobile_dev", ""))
+            display_pref_raw    = normalize_str(rec.get("displayname_dati", "")) or normalize_str(rec.get("upn_dev", ""))
 
-            add_mail_val    = mail_pref                                  # non quotato
-            add_mobile_val  = quote_if_value(mobile_pref)                 # quotato se presente
-            add_display_val = quote_if_value(display_pref)                # add_userprincipalname (da DisplayName o UPN)
-            old_pc          = normalize_str(rec.get("old_computer", ""))
-            dn_val          = normalize_str(rec.get("dn", ""))
+            # Valori formattati per ADD
+            add_mail_val        = mail_pref_raw                          # non quotato
+            add_mobile_val      = quote_if_value(mobile_pref_raw)        # quotato se presente
+            add_display_val     = quote_if_value(display_pref_raw)       # add_userprincipalname (DisplayName o UPN)
+
+            old_pc              = normalize_str(rec.get("old_computer", ""))
+            dn_val              = normalize_str(rec.get("dn", ""))
 
             # Alert: vecchio asset con OU=PDL in dismissione nel DN
             if old_pc and "ou=pdl in dismissione" in dn_val.lower():
@@ -300,21 +307,32 @@ if generate:
         # CSV 1: RIFERIMENTI
         # -----------------------------
 
-        # 1) RIMOZIONE: SOLO 'SI' + Computer=old_pc (se presente)
+        # 1) RIMOZIONE: crea la riga SOLO se c'è almeno un riferimento da rimuovere
         if old_pc:
-            row_remove = [""] * 10
-            row_remove[0] = old_pc   # Computer
-            row_remove[3] = "SI"     # remove_mail
-            row_remove[5] = "SI"     # remove_mobile
-            row_remove[7] = "SI"     # remove_userprincipalname
-            rows_rif.append(row_remove)
+            has_mail_to_remove    = bool(mail_pref_raw)
+            has_mobile_to_remove  = bool(mobile_pref_raw)
+            has_display_to_remove = bool(display_pref_raw)
+
+            if has_mail_to_remove or has_mobile_to_remove or has_display_to_remove:
+                row_remove = [""] * 10
+                row_remove[0] = old_pc   # Computer
+
+                if has_mail_to_remove:
+                    row_remove[3] = "SI"  # remove_mail
+                if has_mobile_to_remove:
+                    row_remove[5] = "SI"  # remove_mobile
+                if has_display_to_remove:
+                    row_remove[7] = "SI"  # remove_userprincipalname
+
+                rows_rif.append(row_remove)
+            # Altrimenti: nessuna riga di remove
 
         # 2) AGGIUNTA: usa i dati (preferendo estr_dati)
         row_add = [""] * 10
         row_add[0] = nuovo_pc
         row_add[2] = add_mail_val
         row_add[4] = add_mobile_val
-        row_add[6] = add_display_val  # <- add_userprincipalname = DisplayName (estr_dati) -> fallback UPN (estr_device)
+        row_add[6] = add_display_val  # <- add_userprincipalname (DisplayName o fallback UPN)
         rows_rif.append(row_add)
 
         # -----------------------------
