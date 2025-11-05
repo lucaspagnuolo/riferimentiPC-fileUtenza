@@ -132,13 +132,13 @@ if generate:
 
     # Colonne necessarie in estr_device
     try:
-        dev_description   = get_col_case_insensitive(raw_dev, "Description")          # J -> estrae sam
-        dev_mail          = get_col_case_insensitive(raw_dev, "Mail")                 # K -> fallback add_mail
-        dev_mobile        = get_col_case_insensitive(raw_dev, "Mobile")               # L -> fallback add_mobile
-        dev_upn           = get_col_case_insensitive(raw_dev, "userPrincipalName")    # N -> fallback add_userprincipalname
-        dev_name_oldpc    = get_col_case_insensitive(raw_dev, "Name")                 # vecchio asset
-        dev_enabled       = get_col_case_insensitive(raw_dev, "Enabled")              # F
-        dev_dn            = get_col_case_insensitive(raw_dev, "DistinguishedName")    # E
+        dev_description   = get_col_case_insensitive(raw_dev, "Description")          # -> estrae sam
+        dev_mail          = get_col_case_insensitive(raw_dev, "Mail")                 # -> riferimenti sul COMPUTER
+        dev_mobile        = get_col_case_insensitive(raw_dev, "Mobile")               # -> riferimenti sul COMPUTER
+        dev_upn           = get_col_case_insensitive(raw_dev, "userPrincipalName")    # -> riferimenti sul COMPUTER
+        dev_name_oldpc    = get_col_case_insensitive(raw_dev, "Name")                 # nome asset
+        dev_enabled       = get_col_case_insensitive(raw_dev, "Enabled")
+        dev_dn            = get_col_case_insensitive(raw_dev, "DistinguishedName")
     except KeyError as ke:
         st.error(str(ke))
         st.stop()
@@ -159,18 +159,43 @@ if generate:
     f_name_oldpc    = get_col_case_insensitive(fdev, "Name").astype(str)
     f_dn            = get_col_case_insensitive(fdev, "DistinguishedName").astype(str)
 
+    # Base per utente (da Description) + info device usate come fallback ADD
     estr_df = pd.DataFrame({
         "samaccountname": f_description.map(extract_sam_from_description),
-        "mail_dev":       f_mail.map(normalize_str),         # fallback
-        "mobile_dev":     f_mobile.map(normalize_str),       # fallback
-        "upn_dev":        f_upn.map(normalize_str),          # fallback per add_userprincipalname
+        "mail_dev":       f_mail.map(normalize_str),         # fallback per ADD (utente)
+        "mobile_dev":     f_mobile.map(normalize_str),       # fallback per ADD (utente)
+        "upn_dev":        f_upn.map(normalize_str),          # fallback per ADD (utente)
         "old_computer":   f_name_oldpc.map(normalize_str),   # vecchio asset
         "dn":             f_dn.map(normalize_str)
     })
     estr_df["sam_norm"] = estr_df["samaccountname"].map(lower_norm)
 
+    # --- Lookup: riferimenti del COMPUTER (Name -> Mail, Mobile, userPrincipalName) ---
+    COMPUTER_MAIL_COL   = "Mail"
+    COMPUTER_MOBILE_COL = "Mobile"
+    COMPUTER_UPN_COL    = "userPrincipalName"
+
+    computer_refs_by_name = (
+        fdev[["Name", COMPUTER_MAIL_COL, COMPUTER_MOBILE_COL, COMPUTER_UPN_COL]]
+        .rename(columns={
+            "Name": "comp_name",
+            COMPUTER_MAIL_COL: "comp_mail",
+            COMPUTER_MOBILE_COL: "comp_mobile",
+            COMPUTER_UPN_COL: "comp_upn",
+        })
+        .assign(
+            comp_name=lambda d: d["comp_name"].map(normalize_str),
+            comp_mail=lambda d: d["comp_mail"].map(normalize_str),
+            comp_mobile=lambda d: d["comp_mobile"].map(normalize_str),
+            comp_upn=lambda d: d["comp_upn"].map(normalize_str),
+        )
+        .drop_duplicates(subset=["comp_name"], keep="first")
+        .set_index("comp_name")
+        .to_dict(orient="index")
+    )
+
     # ============== Lettura (opzionale) estr_dati ==============
-    # Obiettivo: ricavare mail/mobile/displayname più "autoritative" e fare merge su sam_norm
+    # Obiettivo: per l'ADD ricavare mail/mobile/displayname più "autoritative"
     dati_loaded = False
     if uploaded_dati is not None:
         try:
@@ -181,11 +206,6 @@ if generate:
 
         raw_dati.columns = [str(c).strip() for c in raw_dati.columns]
 
-        # Candidati come da storico:
-        # - SAM: "SamAccountName"/"sAMAccountName" (A)
-        # - Mobile: "Mobile" (E)
-        # - mail: "mail"/"Mail"/"e-mail"/"email" (J)
-        # - DisplayName: "DisplayName" (preferito), fallback "Name"/"cn"
         sam_dati        = pick_ci(raw_dati, ["SamAccountName", "sAMAccountName"])
         mail_dati       = pick_ci(raw_dati, ["mail", "Mail", "e-mail", "email"])
         mobile_dati     = pick_ci(raw_dati, ["Mobile", "mobile"])
@@ -195,7 +215,6 @@ if generate:
             st.error("In estr_dati non è stata trovata la colonna 'SamAccountName'/'sAMAccountName'. Impossibile allineare i dati.")
             st.stop()
 
-        # Normalizza serie (le altre possono essere None -> serie vuote)
         sam_dati = sam_dati.astype(str)
 
         if mail_dati is None:
@@ -221,16 +240,11 @@ if generate:
             "mail_dati":        mail_dati.map(normalize_str),
             "mobile_dati":      mobile_dati.map(normalize_str),
             "displayname_dati": display_dati.map(normalize_str),
-        })
+        }).drop_duplicates(subset=["sam_norm"], keep="first")
 
-        # Deduplica per sam_norm mantenendo la prima occorrenza
-        dati_map = dati_map.drop_duplicates(subset=["sam_norm"], keep="first")
-
-        # Merge su estr_df
         estr_df = estr_df.merge(dati_map, on="sam_norm", how="left")
         dati_loaded = True
     else:
-        # Se non caricato estr_dati, crea colonne vuote per uniformità
         estr_df["mail_dati"] = ""
         estr_df["mobile_dati"] = ""
         estr_df["displayname_dati"] = ""
@@ -258,6 +272,7 @@ if generate:
     warnings = []
     alerts = []
     valid_pairs = 0
+    remove_rows_count = 0  # contatore righe remove generate
 
     for _, r in pairs_df.iterrows():
         nuovo_pc = normalize_str(r.get("NuovoPC", ""))
@@ -267,37 +282,32 @@ if generate:
             continue
 
         valid_pairs += 1
+
         # Match su samaccountname (case-insensitive)
         match = estr_df[estr_df["sam_norm"] == utenza.lower()]
 
+        # Default
+        mail_pref_raw = mobile_pref_raw = display_pref_raw = ""
+        add_mail_val = add_mobile_val = add_display_val = ""
+        old_pc = dn_val = ""
+
         if match.empty:
             warnings.append(f"• Utente '{utenza}' non trovato tra i record con Enabled = True in estr_device.")
-            # Nessun dato disponibile -> tutti vuoti
-            mail_pref_raw    = ""
-            mobile_pref_raw  = ""
-            display_pref_raw = ""
-            add_mail_val     = ""
-            add_mobile_val   = ""
-            add_display_val  = ""
-            old_pc           = ""
-            dn_val           = ""
         else:
             rec = match.iloc[0]
 
-            # Precedenza: estr_dati -> estr_device (RAW)
+            # ADD: precedenza estr_dati -> estr_device (RAW)
             mail_pref_raw       = normalize_str(rec.get("mail_dati", "")) or normalize_str(rec.get("mail_dev", ""))
             mobile_pref_raw     = normalize_str(rec.get("mobile_dati", "")) or normalize_str(rec.get("mobile_dev", ""))
             display_pref_raw    = normalize_str(rec.get("displayname_dati", "")) or normalize_str(rec.get("upn_dev", ""))
 
-            # Valori formattati per ADD
-            add_mail_val        = mail_pref_raw                          # non quotato
-            add_mobile_val      = quote_if_value(mobile_pref_raw)        # quotato se presente
-            add_display_val     = quote_if_value(display_pref_raw)       # add_userprincipalname (DisplayName o UPN)
+            add_mail_val        = mail_pref_raw                    # non quotato
+            add_mobile_val      = quote_if_value(mobile_pref_raw)  # quotato se presente
+            add_display_val     = quote_if_value(display_pref_raw) # quotato se presente
 
             old_pc              = normalize_str(rec.get("old_computer", ""))
             dn_val              = normalize_str(rec.get("dn", ""))
 
-            # Alert: vecchio asset con OU=PDL in dismissione nel DN
             if old_pc and "ou=pdl in dismissione" in dn_val.lower():
                 alerts.append(
                     f"⚠️ Vecchio asset '{old_pc}' è in 'OU=PDL in dismissione' (DN: {dn_val}) per l'utenza '{utenza}'."
@@ -307,32 +317,35 @@ if generate:
         # CSV 1: RIFERIMENTI
         # -----------------------------
 
-        # 1) RIMOZIONE: crea la riga SOLO se c'è almeno un riferimento da rimuovere
+        # 1) RIMOZIONE: crea riga SOLO se il VECCHIO ASSET ha riferimenti propri in estr_device
         if old_pc:
-            has_mail_to_remove    = bool(mail_pref_raw)
-            has_mobile_to_remove  = bool(mobile_pref_raw)
-            has_display_to_remove = bool(display_pref_raw)
+            comp_refs = computer_refs_by_name.get(old_pc, None)
+            if comp_refs:
+                has_mail_to_remove    = bool(comp_refs.get("comp_mail", ""))
+                has_mobile_to_remove  = bool(comp_refs.get("comp_mobile", ""))
+                has_display_to_remove = bool(comp_refs.get("comp_upn", ""))
 
-            if has_mail_to_remove or has_mobile_to_remove or has_display_to_remove:
-                row_remove = [""] * 10
-                row_remove[0] = old_pc   # Computer
+                if has_mail_to_remove or has_mobile_to_remove or has_display_to_remove:
+                    row_remove = [""] * 10
+                    row_remove[0] = old_pc
 
-                if has_mail_to_remove:
-                    row_remove[3] = "SI"  # remove_mail
-                if has_mobile_to_remove:
-                    row_remove[5] = "SI"  # remove_mobile
-                if has_display_to_remove:
-                    row_remove[7] = "SI"  # remove_userprincipalname
+                    if has_mail_to_remove:
+                        row_remove[3] = "SI"  # remove_mail
+                    if has_mobile_to_remove:
+                        row_remove[5] = "SI"  # remove_mobile
+                    if has_display_to_remove:
+                        row_remove[7] = "SI"  # remove_userprincipalname
 
-                rows_rif.append(row_remove)
-            # Altrimenti: nessuna riga di remove
+                    rows_rif.append(row_remove)
+                    remove_rows_count += 1
+            # Se non ha riferimenti: nessuna riga di remove
 
         # 2) AGGIUNTA: usa i dati (preferendo estr_dati)
         row_add = [""] * 10
         row_add[0] = nuovo_pc
         row_add[2] = add_mail_val
         row_add[4] = add_mobile_val
-        row_add[6] = add_display_val  # <- add_userprincipalname (DisplayName o fallback UPN)
+        row_add[6] = add_display_val  # add_userprincipalname
         rows_rif.append(row_add)
 
         # -----------------------------
@@ -359,7 +372,10 @@ if generate:
     w2.writerows(rows_desc)
 
     # Esito & Messaggi
-    st.success(f"CSV generati: {file1_name} (righe: {len(rows_rif)}) e {file2_name} (righe: {len(rows_desc)})")
+    st.success(
+        f"CSV generati: {file1_name} (righe: {len(rows_rif)}; remove generate: {remove_rows_count}) "
+        f"e {file2_name} (righe: {len(rows_desc)})"
+    )
 
     if not dati_loaded:
         st.info("Non hai caricato 'estr_dati': userò i valori di 'estr_device' per mail/mobile e userPrincipalName per add_userprincipalname (fallback).")
