@@ -10,7 +10,7 @@ import csv
 st.set_page_config(page_title="Generatore CSV Riferimenti & Descrizione", layout="wide")
 
 st.title("Generatore CSV per Asset PC (Riferimenti + Descrition)")
-st.caption("Unisce e generalizza i tuoi codice1/codice2, con supporto a più combinazioni NuovoPC–samaccountname.")
+st.caption("Genera CSV con supporto a più combinazioni NuovoPC–samaccountname.")
 
 # -----------------------------
 # Utility
