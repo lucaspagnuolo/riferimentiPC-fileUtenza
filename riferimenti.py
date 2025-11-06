@@ -365,6 +365,8 @@ if generate:
     w1 = csv.writer(buf1, lineterminator="\n")
     w1.writerow(header_rif)
     w1.writerows(rows_rif)
+    # Riga EOF
+    w1.writerow(["EOF-riga lasciata appositamente scritta così per verificare che nessun PC sia andato nella OU/dismessi/computer"])
 
     buf2 = StringIO()
     w2 = csv.writer(buf2, lineterminator="\n")
